@@ -110,7 +110,7 @@ def design_scene() -> tuple[dict, list[list[float]]]:
         # 初始状态配置
         init_state=ArticulationCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.5),  # 机器人初始位置（抬高0.5米避免穿地）
-            # joint_pos={} 可以在这里设置初始关节角度，但我们先让它用默认值
+            joint_pos = {}
         ),
         
         # 6. 执行器配置 - 这里定义如何控制关节
@@ -238,9 +238,9 @@ def run_simulator(sim: sim_utils.SimulationContext, entities: dict[str, Articula
         # 每50步打印一次关节状态和IMU数据
         if count % 50 == 0 and count > 0:
             print(f"\n{'='*70}")
-            # print(f"[Step {count}] 机器人状态:")
-            # print(f"  关节位置: {robot.data.joint_pos.cpu().numpy()}")
-            # print(f"  关节速度: {robot.data.joint_vel.cpu().numpy()}")
+            print(f"[Step {count}] 机器人状态:")
+            print(f"  关节位置: {robot.data.joint_pos.cpu().numpy()}")
+            print(f"  关节速度: {robot.data.joint_vel.cpu().numpy()}")
             
             # 打印IMU数据
             print(f"\n[Step {count}] IMU传感器数据:")
