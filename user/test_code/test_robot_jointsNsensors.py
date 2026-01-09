@@ -17,6 +17,8 @@ from matplotlib.pylab import rint
 
 from isaaclab.app import AppLauncher
 
+
+
 # 创建参数解析器
 parser = argparse.ArgumentParser(description="Test robot joints with torque control.")
 # 添加AppLauncher的命令行参数
@@ -36,6 +38,13 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, ArticulationCfg
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.sensors import ImuCfg, Imu
+from VMC import VMCSolver
+
+# VMC求解器实例化需要传入参数：motor_distance, L1, L2
+# 根据URDF，这些参数需要从实际机器人测量得到
+# 这里使用示例值，需要根据实际机器人调整
+left_vmc = VMCSolver()
+right_vmc = VMCSolver()
 
 def quat_to_euler(quat: torch.Tensor) -> torch.Tensor:
     w, x, y, z = quat.unbind(-1)
@@ -110,7 +119,11 @@ def design_scene() -> tuple[dict, list[list[float]]]:
         # 初始状态配置
         init_state=ArticulationCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.5),  # 机器人初始位置（抬高0.5米避免穿地）
-            joint_pos = {}
+            joint_pos = {'Left_front_joint':0.0,
+                         'Left_rear_joint':0.0,
+                         'Right_front_joint':0.0,
+                         'Right_rear_joint':0.0,
+                         },
         ),
         
         # 6. 执行器配置 - 这里定义如何控制关节
@@ -125,11 +138,11 @@ def design_scene() -> tuple[dict, list[list[float]]]:
                 # 扭矩限制（牛顿米）- 这限制了可以施加多大的力
                 effort_limit_sim=80.0,
                 
-                # PD控制器参数：
-                # stiffness=0.0: 刚度为0，表示纯扭矩控制（不使用位置控制）
-                # damping=0.0: 阻尼为0，表示不添加额外的阻尼
-                stiffness=0.0,
-                damping=0.0,
+                # PD控制器参数：用于位置控制
+                # stiffness: 刚度，控制位置误差产生的力
+                # damping: 阻尼，控制速度产生的阻力
+                stiffness=200.0,
+                damping=5.0,
             ),
         },
     )
@@ -179,6 +192,15 @@ def run_simulator(sim: sim_utils.SimulationContext, entities: dict[str, Articula
     sim_dt = sim.get_physics_dt()
     count = 0
     
+    # 指定要监控的关节
+    target_joints = ['Left_front_joint']#'Left_front_joint', 'Left_rear_joint', 'Right_front_joint', 
+    
+    # 找到这些关节在joint_names中的索引
+    joint_indices = []
+    for target_joint in target_joints:
+        if target_joint in robot.joint_names:
+            joint_indices.append(robot.joint_names.index(target_joint))
+    
     # 首次打印机器人信息
     print("\n" + "="*60)
     print("[INFO]: Robot Information")
@@ -186,9 +208,25 @@ def run_simulator(sim: sim_utils.SimulationContext, entities: dict[str, Articula
     print(f"Number of robots: {robot.num_instances}")
     print(f"Number of bodies: {robot.num_bodies}")
     print(f"Number of joints: {robot.num_joints}")
-    print(f"Joint names: {robot.joint_names}")
+    print(f"All joint names: {robot.joint_names}")
+    print(f"\nMonitoring these joints: {target_joints}")
+    print(f"Joint indices: {joint_indices}")
     print(f"Body names: {robot.body_names}")
     print("="*60 + "\n")
+    
+    # 显示joint 0的位置信息
+    print("\n" + "="*60)
+    print("[INFO]: 查看 joint 0 的位置信息")
+    print("="*60)
+    if len(joint_indices) > 0:
+        joint_0_name = target_joints[0]
+        joint_0_index = joint_indices[0]
+        print(f"Joint 0 名称: {joint_0_name}")
+        print(f"Joint 0 索引: {joint_0_index}")
+        print(f"Joint 0 初始位置: {robot.data.joint_pos[0, joint_0_index].item():.4f} rad")
+        print(f"Joint 0 初始速度: {robot.data.joint_vel[0, joint_0_index].item():.4f} rad/s")
+    print("="*60 + "\n")
+    print("[INFO]: 开始仿真，目标关节将保持在0位置...\n")
     
     # 主仿真循环
     while simulation_app.is_running():
@@ -215,12 +253,16 @@ def run_simulator(sim: sim_utils.SimulationContext, entities: dict[str, Articula
             robot.reset()
             imu_sensor.reset()  # 重置IMU传感器
         
-        # # 应用扭矩控制 - 这是测试关节运动的核心部分
-        # efforts = torch.randn_like(robot.data.joint_pos) * 5.0
-        # print(f"[Step {count}] Applying random torques: {efforts.cpu().numpy()}")
-
-        # # 设置关节扭矩目标
-        # robot.set_joint_effort_target(efforts)
+        # 设置目标关节保持在0位置
+        # 创建目标位置张量，默认保持当前位置
+        joint_pos_target = robot.data.joint_pos.clone()
+        
+        # 将指定的6个关节设置为0位置
+        for idx in joint_indices:
+            joint_pos_target[0, idx] = 1.0#0.0
+        
+        # 设置关节位置目标（使用PD控制器自动计算所需扭矩）
+        robot.set_joint_position_target(joint_pos_target)
         
         # 将数据写入仿真器
         robot.write_data_to_sim()
@@ -234,14 +276,34 @@ def run_simulator(sim: sim_utils.SimulationContext, entities: dict[str, Articula
         
         # 更新IMU传感器数据
         imu_sensor.update(sim_dt)
+
+        # 使用VMC求解器计算关节力矩
+        left_front_pos = robot.data.joint_pos[0, robot.joint_names.index('Left_front_joint')].item()
+        right_front_pos = robot.data.joint_pos[0, robot.joint_names.index('Right_front_joint')].item()
+        left_rear_pos = robot.data.joint_pos[0, robot.joint_names.index('Left_rear_joint')].item()
+        right_rear_pos = robot.data.joint_pos[0, robot.joint_names.index('Right_rear_joint')].item()
+
+
+        left_vmc.Resolve(torch.pi+right_rear_pos,-right_front_pos)
+        right_vmc.Resolve(torch.pi-left_rear_pos, left_front_pos)
         
         # 每50步打印一次关节状态和IMU数据
         if count % 50 == 0 and count > 0:
             print(f"\n{'='*70}")
             print(f"[Step {count}] 机器人状态:")
-            print(f"  关节位置: {robot.data.joint_pos.cpu().numpy()}")
-            print(f"  关节速度: {robot.data.joint_vel.cpu().numpy()}")
-            
+            # 只打印目标关节的位置和速度
+            print(f"  监控关节名称: {target_joints}")
+            joint_positions = [robot.data.joint_pos[0, idx].item() for idx in joint_indices]
+            joint_velocities = [robot.data.joint_vel[0, idx].item() for idx in joint_indices]
+            print(f"  关节位置 (rad): {joint_positions}")
+            print(f"  关节速度 (rad/s): {joint_velocities}")
+            print(f"left front: {left_front_pos}, left rear: {torch.pi-left_rear_pos}, right front: {-right_front_pos}, right rear: {torch.pi+right_rear_pos}")
+            print(f"  左侧VMC倒立摆长度: {left_vmc.GetPendulumLen():.4f} m")
+            print(f"  左侧VMC倒立摆摆角: {left_vmc.GetPendulumRadian():.4f} rad")
+            print(f"  右侧VMC倒立摆长度: {right_vmc.GetPendulumLen():.4f} m")
+            print(f"  右侧VMC倒立摆摆角: {right_vmc.GetPendulumRadian():.4f} rad")
+
+
             # 打印IMU数据
             print(f"\n[Step {count}] IMU传感器数据:")
             print(f"  线性加速度 (m/s²): {imu_sensor.data.lin_acc_b[0].cpu().numpy()}")

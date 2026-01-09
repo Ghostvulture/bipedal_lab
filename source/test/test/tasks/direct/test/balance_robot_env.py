@@ -18,6 +18,8 @@ from isaaclab.sensors import Imu
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.math import sample_uniform
 
+from user.test_code.test_robot_jointsNsensors import quat_to_euler
+
 from .balance_robot_env_cfg import BalanceRobotEnvCfg
 
 
@@ -33,8 +35,19 @@ class BalanceRobotEnv(DirectRLEnv):
 
         # TODO: 根据你的实际关节名称获取关节索引
         # 方法1: 如果你知道确切的关节名称
-        self._left_wheel_idx, _ = self.robot.find_joints("left_wheel_joint")
-        self._right_wheel_idx, _ = self.robot.find_joints("right_wheel_joint")
+        self._left_front_idx, _ = self.robot.find_joints("Left_front_joint")
+        self._left_rear_idx, _ = self.robot.find_joints("Left_rear_joint")
+        self._right_front_idx, _ = self.robot.find_joints("Right_front_joint")
+        self._right_rear_idx, _ = self.robot.find_joints("Right_rear_joint")
+        self._left_wheel_idx, _ = self.robot.find_joints("Left_Wheel_joint")
+        self._right_wheel_idx, _ = self.robot.find_joints("Right_Wheel_joint")
+        self._controlled_joint_indices = [
+            self._left_front_idx, self._left_rear_idx,
+            self._right_front_idx, self._right_rear_idx,
+            self._left_wheel_idx, self._right_wheel_idx]
+
+        # ['Left_front_joint', 'Left_rear_joint', 'Right_front_joint', 
+        #                       'Right_rear_joint', 'Left_Wheel_joint', 'Right_Wheel_joint']
         
         # 方法2: 获取所有关节（如果所有关节都要控制）
         # self._controlled_joint_indices = list(range(self.robot.num_joints))
@@ -103,14 +116,21 @@ class BalanceRobotEnv(DirectRLEnv):
         # 以下是一个示例，包含IMU数据和关节状态
         
         obs_list = []
+
+        # 观察空间包含：
+        # - IMU数据: RPY(3) + RPY角速度(3) = 6
+        # - 关节状态: 腿长度+腿摆角（2） = 2
+        # - 机器人根状态: 位置x(1) + 速度v(1) = 2
+        # 例如：如果2个关节，obs = 6(IMU) + 2(pos) + 2(vel) = 10
         
         # 1. IMU数据（10维）
-        # 线性加速度 (3)
-        obs_list.append(self.imu.data.lin_acc_b)
+        # RPY
+        quat_copy = self.imu.data.quat_w
+        rpy = quat_to_euler(quat_copy)
+        obs_list.append(rpy)
         # 角速度 (3)
         obs_list.append(self.imu.data.ang_vel_b)
-        # 姿态四元数 (4)
-        obs_list.append(self.imu.data.quat_w)
+
         
         # 2. 关节状态
         # 关节位置 (n_joints)
