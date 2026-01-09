@@ -17,8 +17,14 @@ from isaaclab.envs import DirectRLEnv
 from isaaclab.sensors import Imu
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.math import sample_uniform
+import sys
+import os
+import numpy as np
 
+# 添加user/test_code到路径以便导入VMC
+sys.path.append(os.path.join(os.path.dirname(__file__), '../../../../../..'))
 from user.test_code.test_robot_jointsNsensors import quat_to_euler
+from user.test_code.VMC import VMCSolver
 
 from .balance_robot_env_cfg import BalanceRobotEnvCfg
 
@@ -63,6 +69,14 @@ class BalanceRobotEnv(DirectRLEnv):
         self.previous_actions = torch.zeros(
             (self.num_envs, self.cfg.action_space), device=self.device
         )
+        
+        # 初始化VMC求解器 - 每个环境一个左右VMC
+        # 参数需要根据实际机器人调整
+        self.left_vmc_solvers = [VMCSolver() for _ in range(self.num_envs)]
+        self.right_vmc_solvers = [VMCSolver() for _ in range(self.num_envs)]
+        
+        # 初始化目标速度（每个环境一个）
+        self.target_velocity = torch.zeros(self.num_envs, device=self.device)
 
     def _setup_scene(self):
         """设置场景"""
@@ -118,33 +132,84 @@ class BalanceRobotEnv(DirectRLEnv):
         obs_list = []
 
         # 观察空间包含：
-        # - IMU数据: RPY(3) + RPY角速度(3) = 6
-        # - 关节状态: 腿长度+腿摆角（2） = 2
-        # - 机器人根状态: 位置x(1) + 速度v(1) = 2
-        # 例如：如果2个关节，obs = 6(IMU) + 2(pos) + 2(vel) = 10
+        # - IMU数据: RPY(3) + 角速度(3) = 6
+        # - VMC数据: 双腿摆角平均值(1) + 双腿长度平均值(1) = 2
+        # 总计: 6 + 2 = 8维
         
-        # 1. IMU数据（10维）
-        # RPY
+        # 1. IMU数据（6维）
+        # RPY (3)
         quat_copy = self.imu.data.quat_w
         rpy = quat_to_euler(quat_copy)
         obs_list.append(rpy)
         # 角速度 (3)
-        obs_list.append(self.imu.data.ang_vel_b)
+        ang_vel = self.imu.data.ang_vel_b
+        obs_list.append(ang_vel)
+        
+        # 保存RPY和角速度供reward函数使用
+        self.roll = rpy[:, 0]      # [num_envs]
+        self.pitch = rpy[:, 1]     # [num_envs]
+        self.yaw = rpy[:, 2]       # [num_envs]
+        self.ang_vel_x = ang_vel[:, 0]  # [num_envs]
+        self.ang_vel_y = ang_vel[:, 1]  # [num_envs]
+        self.ang_vel_z = ang_vel[:, 2]  # [num_envs]
+        
+        # 2. VMC数据：计算双腿摆角和长度的平均值 (2维)
+        avg_pendulum_angle = torch.zeros((self.num_envs, 1), device=self.device)
+        avg_pendulum_length = torch.zeros((self.num_envs, 1), device=self.device)
+        avg_pendulum_angle_vel = torch.zeros((self.num_envs, 1), device=self.device)
+        avg_pendulum_length_vel = torch.zeros((self.num_envs, 1), device=self.device)
+        
+        for env_id in range(self.num_envs):
+            # 获取关节位置
+            left_front_pos = self.joint_pos[env_id, self._left_front_idx].item()
+            right_front_pos = self.joint_pos[env_id, self._right_front_idx].item()
+            left_rear_pos = self.joint_pos[env_id, self._left_rear_idx].item()
+            right_rear_pos = self.joint_pos[env_id, self._right_rear_idx].item()
+
+            left_4_vel = self.joint_vel[env_id, self._left_front_idx].item()
+            right_4_vel = self.joint_vel[env_id, self._right_front_idx].item()
+            left_1_vel = self.joint_vel[env_id, self._left_rear_idx].item()
+            right_1_vel = self.joint_vel[env_id, self._right_rear_idx].item()
+            
+            # 使用VMC求解器计算,反过来
+            self.left_vmc_solvers[env_id].Resolve(math.pi + right_rear_pos, -right_front_pos)
+            self.right_vmc_solvers[env_id].Resolve(math.pi - left_rear_pos, left_front_pos)
+            left_leg_vel, left_theta_vel = self.left_vmc_solvers[env_id].VMCVelCal(np.array([right_1_vel, -right_4_vel]))
+            right_leg_vel, right_theta_vel = self.right_vmc_solvers[env_id].VMCVelCal(np.array([-left_1_vel, left_4_vel]))
+            
+            # 获取倒立摆参数
+            left_angle = self.left_vmc_solvers[env_id].GetPendulumRadian()
+            right_angle = self.right_vmc_solvers[env_id].GetPendulumRadian()
+            left_length = self.left_vmc_solvers[env_id].GetPendulumLen()
+            right_length = self.right_vmc_solvers[env_id].GetPendulumLen()            
+            
+            # 计算平均值
+            avg_pendulum_angle[env_id, 0] = (left_angle + right_angle) / 2.0
+            avg_pendulum_length[env_id, 0] = (left_length + right_length) / 2.0
+            avg_pendulum_angle_vel[env_id, 0] = (left_theta_vel + right_theta_vel) / 2.0
+            avg_pendulum_length_vel[env_id, 0] = (left_leg_vel + right_leg_vel) / 2.0
+        
+        obs_list.append(avg_pendulum_angle)
+        obs_list.append(avg_pendulum_length)
+        obs_list.append(avg_pendulum_angle_vel)
+        obs_list.append(avg_pendulum_length_vel)
 
         
-        # 2. 关节状态
-        # 关节位置 (n_joints)
-        obs_list.append(self.joint_pos[:, self._controlled_joint_indices])
-        # 关节速度 (n_joints)
-        obs_list.append(self.joint_vel[:, self._controlled_joint_indices])
+        # 保存VMC参数供奖励函数使用
+        self.avg_pendulum_angle = avg_pendulum_angle.squeeze(-1)  # [num_envs]
+        self.avg_pendulum_length = avg_pendulum_length.squeeze(-1)  # [num_envs]
+        self.avg_pendulum_angle_vel = avg_pendulum_angle_vel.squeeze(-1)  # [num_envs]
+        self.avg_pendulum_length_vel = avg_pendulum_length_vel.squeeze(-1)  # [num_envs]
         
-        # 3. 其他可能有用的观察（可选）
-        # 机器人根位置
-        # obs_list.append(self.robot.data.root_pos_w)
-        # 机器人根线速度
-        # obs_list.append(self.robot.data.root_lin_vel_w)
-        # 机器人根角速度
-        # obs_list.append(self.robot.data.root_ang_vel_w)
+        # 3. X and V
+        obs_list.append(self.robot.data.root_pos_w[:, 0:1])  # X position
+        obs_list.append(self.robot.data.root_lin_vel_w[:, 0:1])  # X velocity
+        
+        # 保存X速度供奖励函数使用
+        self.x_velocity = self.robot.data.root_lin_vel_w[:, 0]  # [num_envs]
+        
+        # 4. 目标速度
+        obs_list.append(self.target_velocity.unsqueeze(-1))  # [num_envs, 1]
         
         # 拼接所有观察
         obs = torch.cat(obs_list, dim=-1)
@@ -168,18 +233,26 @@ class BalanceRobotEnv(DirectRLEnv):
         # 1. 存活奖励：每步都给予，鼓励机器人保持不倒
         total_reward += self.cfg.rew_scale_alive
         
-        # 2. 姿态奖励：鼓励保持直立
-        # 从四元数提取pitch角（可以用于判断是否直立）
-        # 四元数到欧拉角的简化计算（只计算pitch）
-        quat = self.imu.data.quat_w  # [num_envs, 4] (w, x, y, z)
-        w, x, y, z = quat.unbind(-1)
-        pitch = torch.asin(2.0 * (w * y - z * x))
+        # 2. 腿摆角奖励：鼓励保持目标摆角
+        target_leg_angle = 1.57  # 目标摆角（约90度）
         
-        # 惩罚pitch角偏离0（直立）
-        upright_reward = -torch.abs(pitch)
-        total_reward += self.cfg.rew_scale_upright * upright_reward
+        # theta and theta_dot
+        leg_angle_error = torch.abs(self.avg_pendulum_angle - target_leg_angle)
+        leg_angle_vel_error = torch.abs(self.avg_pendulum_angle_vel)
+        total_reward -= self.cfg.rew_scale_leg_angle * leg_angle_error
+        total_reward -= self.cfg.rew_scale_leg_angle_vel * leg_angle_vel_error
         
-        # 3. 速度惩罚：惩罚过大的线速度和角速度
+        # 3. pitch and pitch_dot
+        pitch_diff = torch.abs(self.pitch)
+        pitch_vel_diff = torch.abs(self.ang_vel_y)
+        total_reward -= self.cfg.rew_scale_upright * pitch_diff
+        total_reward -= self.cfg.rew_scale_upright_vel * pitch_vel_diff
+        
+        # 4. 速度跟随奖励：鼓励跟随目标速度
+        velocity_error = torch.abs(self.x_velocity - self.target_velocity)
+        total_reward -= self.cfg.rew_scale_velocity_tracking * velocity_error
+        
+        # 5. 速度惩罚：惩罚过大的线速度和角速度
         lin_vel_penalty = -torch.sum(self.robot.data.root_lin_vel_w ** 2, dim=-1)
         total_reward += self.cfg.rew_scale_lin_vel * lin_vel_penalty
         
@@ -221,8 +294,8 @@ class BalanceRobotEnv(DirectRLEnv):
         w, x, y, z = quat.unbind(-1)
         
         # 计算pitch和roll
-        pitch = torch.asin(2.0 * (w * y - z * x))
-        roll = torch.atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y))
+        pitch = self.pitch
+        roll = self.roll
         
         # 如果倾斜角度过大，认为跌倒
         tipped_over = (torch.abs(pitch) > self.cfg.max_tilt_angle) | \
@@ -274,3 +347,11 @@ class BalanceRobotEnv(DirectRLEnv):
         
         # 3. 重置动作缓存
         self.previous_actions[env_ids] = 0.0
+        
+        # 4. 随机化目标速度（从target_velocity_range范围内采样）
+        self.target_velocity[env_ids] = sample_uniform(
+            self.cfg.target_velocity_range[0],
+            self.cfg.target_velocity_range[1],
+            (len(env_ids),),
+            device=self.device,
+        )

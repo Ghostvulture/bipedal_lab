@@ -16,6 +16,7 @@ import os
 from matplotlib.pylab import rint
 
 from isaaclab.app import AppLauncher
+import numpy as np
 
 
 
@@ -257,9 +258,14 @@ def run_simulator(sim: sim_utils.SimulationContext, entities: dict[str, Articula
         # 创建目标位置张量，默认保持当前位置
         joint_pos_target = robot.data.joint_pos.clone()
         
-        # 将指定的6个关节设置为0位置
+        # 正弦函数正负1波动
+        sin_value = np.sin(count * 0.1)
+                
+        # 将指定的关节设置为正弦波动位置
         for idx in joint_indices:
-            joint_pos_target[0, idx] = 1.0#0.0
+            joint_pos_target[0, idx] = sin_value  # 或者使用固定值如 1.0
+
+
         
         # 设置关节位置目标（使用PD控制器自动计算所需扭矩）
         robot.set_joint_position_target(joint_pos_target)
@@ -279,16 +285,23 @@ def run_simulator(sim: sim_utils.SimulationContext, entities: dict[str, Articula
 
         # 使用VMC求解器计算关节力矩
         left_front_pos = robot.data.joint_pos[0, robot.joint_names.index('Left_front_joint')].item()
-        right_front_pos = robot.data.joint_pos[0, robot.joint_names.index('Right_front_joint')].item()
         left_rear_pos = robot.data.joint_pos[0, robot.joint_names.index('Left_rear_joint')].item()
+        right_front_pos = robot.data.joint_pos[0, robot.joint_names.index('Right_front_joint')].item()
         right_rear_pos = robot.data.joint_pos[0, robot.joint_names.index('Right_rear_joint')].item()
 
+        left_4_vel = robot.data.joint_vel[0, robot.joint_names.index('Left_front_joint')].item()
+        left_1_vel = robot.data.joint_vel[0, robot.joint_names.index('Left_rear_joint')].item()
+        right_4_vel = robot.data.joint_vel[0, robot.joint_names.index('Right_front_joint')].item()
+        right_1_vel = robot.data.joint_vel[0, robot.joint_names.index('Right_rear_joint')].item()
 
         left_vmc.Resolve(torch.pi+right_rear_pos,-right_front_pos)
         right_vmc.Resolve(torch.pi-left_rear_pos, left_front_pos)
-        
+        left_vmc.VMCVelCal(np.array([right_1_vel, -right_4_vel]))
+        right_vmc.VMCVelCal(np.array([-left_1_vel, left_4_vel]))
+
+
         # 每50步打印一次关节状态和IMU数据
-        if count % 50 == 0 and count > 0:
+        if count % 10 == 0 and count > 0:
             print(f"\n{'='*70}")
             print(f"[Step {count}] 机器人状态:")
             # 只打印目标关节的位置和速度
@@ -302,6 +315,11 @@ def run_simulator(sim: sim_utils.SimulationContext, entities: dict[str, Articula
             print(f"  左侧VMC倒立摆摆角: {left_vmc.GetPendulumRadian():.4f} rad")
             print(f"  右侧VMC倒立摆长度: {right_vmc.GetPendulumLen():.4f} m")
             print(f"  右侧VMC倒立摆摆角: {right_vmc.GetPendulumRadian():.4f} rad")
+            print(f"left_4_vel: {left_4_vel}, left_1_vel: {left_1_vel}, right_4_vel: {right_4_vel}, right_1_vel: {right_1_vel}")
+            print(f"left VMC倒立摆角速度: {left_vmc.VMCVelCal(np.array([right_1_vel, -right_4_vel]))}")
+            print(f"right VMC倒立摆角速度: {right_vmc.VMCVelCal(np.array([-left_1_vel, left_4_vel]))}")
+
+
 
 
             # 打印IMU数据

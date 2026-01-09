@@ -36,11 +36,12 @@ class BalanceRobotEnvCfg(DirectRLEnvCfg):
     action_space = 6  # TODO: 修改为你要控制的关节数量（例如：左轮关节 + 右轮关节 = 2）
     
     # 观察空间包含：
-    # - IMU数据: RPY(3) + RPY角速度(3) = 6
-    # - 关节状态: 腿长度+腿摆角（2） = 2
-    # - 机器人根状态: 位置x(1) + 速度v(1) = 2
-    # 例如：如果2个关节，obs = 6(IMU) + 2(pos) + 2(vel) = 10
-    observation_space = 10  
+    # - IMU数据: RPY(3) + 角速度(3) = 6
+    # - VMC数据: 腿摆角(1) + 腿长度(1) + 摆角速度(1) + 腿长速度(1) = 4
+    # - 机器人根状态: x(1) + v(1) = 2
+    # - 目标速度: target_v(1) = 1
+    # 总计: 6 + 4 + 2 + 1 = 13
+    observation_space = 13  
     
     state_space = 0  # 特权信息空间（通常设为0，除非需要asymmetric actor-critic）
 
@@ -125,7 +126,7 @@ class BalanceRobotEnvCfg(DirectRLEnvCfg):
 
     # ========== 场景配置 ==========
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=4096,  # 并行环境数量（GPU训练可以很多）
+        num_envs=1,  # 并行环境数量（先用小数量测试，稳定后再增加）
         env_spacing=4.0,  # 环境间距（米）
         replicate_physics=True  # 复制物理场景以提高性能
     )
@@ -141,17 +142,29 @@ class BalanceRobotEnvCfg(DirectRLEnvCfg):
     # 动作缩放因子
     action_scale = 50.0  # TODO: 根据需要调整（将神经网络输出[-1,1]映射到扭矩值）
     
+    # ========== 目标速度跟随配置 ==========
+    # 目标速度范围（米/秒）
+    target_velocity_range = [-1.0, 1.0]  # 每次reset时从这个范围随机采样目标速度
+    
     # ========== 奖励函数权重 ==========
     # TODO: 根据任务目标调整这些权重
     # 奖励设计建议：
     # 1. 存活奖励：鼓励机器人保持不倒
     rew_scale_alive = 1.0
+
+    # 2. 腿摆角和摆角速度惩罚
+    rew_scale_leg_angle = 1.0
+    rew_scale_leg_angle_vel = 0.1
+    
+    # 速度跟随奖励：鼓励机器人跟随目标速度
+    rew_scale_velocity_tracking = 1.0  # 惩罚实际速度与目标速度的偏差
     
     # 2. 终止惩罚：机器人跌倒的惩罚
     rew_scale_terminated = -2.0
     
     # 3. 姿态奖励：鼓励机器人保持直立（pitch角接近0）
     rew_scale_upright = 2.0  # 惩罚pitch角偏离
+    rew_scale_upright_vel = 0.1  # 惩罚pitch角速度
     
     # 4. 速度控制：惩罚过大的速度
     rew_scale_lin_vel = -0.01  # 惩罚过大的线速度
@@ -174,7 +187,7 @@ class BalanceRobotEnvCfg(DirectRLEnvCfg):
     max_tilt_angle = 0.5  # 约28度
     
     # 位置边界：机器人根位置的范围限制
-    max_position = 5.0  # 超出此范围则终止（米）
+    max_position = 10.0  # 超出此范围则终止（米）
     
     # ========== 重置/初始化配置 ==========
     # TODO: 根据需要修改初始状态的随机化范围
