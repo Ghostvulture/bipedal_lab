@@ -20,12 +20,32 @@ import sys
 import os
 import numpy as np
 
-# 添加user/test_code到路径以便导入VMC
-sys.path.append(os.path.join(os.path.dirname(__file__), '../../../../../..'))
-from user.test_code.test_robot_jointsNsensors import quat_to_euler
-from user.test_code.VMC import VMCSolver
+# 添加IsaacLab根目录到路径以便导入user模块
+_isaaclab_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../.."))
+if _isaaclab_root not in sys.path:
+    sys.path.insert(0, _isaaclab_root)
 
-from .balance_robot_env_cfg import BalanceRobotEnvCfg
+from .VMC import VMCSolver
+
+from .balance_robot_env_cfg import LocomotionBipedalEnvCfg
+
+def quat_to_euler(quat: torch.Tensor) -> torch.Tensor:
+    w, x, y, z = quat.unbind(-1)
+
+    t0 = 2.0 * (w * x + y * z)
+    t1 = 1.0 - 2.0 * (x * x + y * y)
+    roll = torch.atan2(t0, t1)
+
+    t2 = 2.0 * (w * y - z * x)
+    t2 = torch.clamp(t2, -1.0, 1.0)
+    pitch = torch.asin(t2)
+
+    t3 = 2.0 * (w * z + x * y)
+    t4 = 1.0 - 2.0 * (y * y + z * z)
+    yaw = torch.atan2(t3, t4)
+
+    return torch.stack((roll, pitch, yaw), dim=-1)
+
 
 
 class BalanceRobotEnv(DirectRLEnv):
@@ -33,9 +53,9 @@ class BalanceRobotEnv(DirectRLEnv):
     
     任务目标：控制平衡机器人保持直立并可能移动
     """
-    cfg: BalanceRobotEnvCfg
+    cfg: LocomotionBipedalEnvCfg
 
-    def __init__(self, cfg: BalanceRobotEnvCfg, render_mode: str | None = None, **kwargs):
+    def __init__(self, cfg: LocomotionBipedalEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
         # TODO: 根据你的实际关节名称获取关节索引

@@ -48,7 +48,7 @@ class RewardCfg:
 
 
 
-
+InteractiveSceneCfg
 @configclass
 class TerminationCfg:
 

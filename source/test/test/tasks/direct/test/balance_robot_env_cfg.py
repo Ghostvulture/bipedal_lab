@@ -12,58 +12,66 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
 from isaaclab.actuators import ImplicitActuatorCfg
-from isaaclab.sensors import ImuCfg
+from isaaclab.terrains import TerrainImporterCfg
 import isaaclab.sim as sim_utils
 
 
 @configclass
-class BalanceRobotEnvCfg(DirectRLEnvCfg):
-    """平衡机器人强化学习环境配置 - RoboMaster Balance Robot"""
+class LocomotionBipedalEnvCfg(DirectRLEnvCfg):
+    """平衡机器人基础环境配置 - 包含核心观察、动作和奖励参数"""
     
-    # ========== 环境基本配置 ==========
-    decimation = 2  # 控制频率降采样：物理步数/控制步数
-    episode_length_s = 10.0  # 每个episode的时长（秒）
+    # env
+    episode_length_s = 10.0
+    decimation = 2
+    action_scale = 50.0
+    action_space = 6
+    observation_space = 13
+    state_space = 0
     
-    # ========== 动作和观察空间定义 ==========
-    # TODO: 根据你的机器人关节数量修改！
-    # 运行 user/test_code/test_robot_jointsNsensors.py 查看：
-    # - Joint names: 会列出所有关节名称
-    # - Number of joints: 关节数量
-    joint_names = ['Left_front_joint', 'Left_rear_joint', 
-                   'Right_front_joint', 'Right_rear_joint', 
-                   'Left_Wheel_joint', 'Right_Wheel_joint']
-    
-    action_space = 6  # TODO: 修改为你要控制的关节数量（例如：左轮关节 + 右轮关节 = 2）
-    
-    # 观察空间包含：
-    # - IMU数据: RPY(3) + 角速度(3) = 6
-    # - VMC数据: 腿摆角(1) + 腿长度(1) + 摆角速度(1) + 腿长速度(1) = 4
-    # - 机器人根状态: x(1) + v(1) = 2
-    # - 目标速度: target_v(1) = 1
-    # 总计: 6 + 4 + 2 + 1 = 13
-    observation_space = 13  
-    
-    state_space = 0  # 特权信息空间（通常设为0，除非需要asymmetric actor-critic）
-
     # ========== 仿真配置 ==========
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 120,  # 物理仿真时间步长：120Hz
-        render_interval=decimation  # 渲染间隔
+        render_interval=decimation,  # 渲染间隔
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
+            static_friction=1.0,
+            dynamic_friction=1.0,
+            restitution=0.0,
+        ),
+    )
+    terrain = TerrainImporterCfg(
+        prim_path="/World/ground",
+        terrain_type="plane",
+        collision_group=-1,
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
+            static_friction=1.0,
+            dynamic_friction=1.0,
+            restitution=0.0,
+        ),
+        debug_vis=False,
     )
 
-    # ========== 机器人配置 ==========
-    # 获取USD文件路径（相对于此配置文件）
+    # ========== 场景配置 ==========
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(
+        num_envs=4096, 
+        env_spacing=5.0,  # 环境间距
+        replicate_physics=True,
+        clone_in_fabric=True  # 关键：启用fabric克隆，确保环境正确分布
+    )
+
+    # robot configuration
     _current_dir = os.path.dirname(os.path.abspath(__file__))
     _usd_path = os.path.abspath(
-        os.path.join(_current_dir, "../../../../../../../user/usd_file/USD/COD-2026RoboMaster-Balance.usd")
+        os.path.join(_current_dir, "../../../../../user/usd_file/USD/COD-2026RoboMaster-Balance.usd")
     )
     
-    robot_cfg: ArticulationCfg = ArticulationCfg(
-        prim_path="/World/envs/env_.*/Robot",  # 机器人在场景中的路径
-        
+    robot: ArticulationCfg = ArticulationCfg(
+        prim_path="/World/envs/env_.*/Robot",
         spawn=sim_utils.UsdFileCfg(
             usd_path=_usd_path,
-            
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 rigid_body_enabled=True,
                 max_linear_velocity=1000.0,
@@ -71,85 +79,31 @@ class BalanceRobotEnvCfg(DirectRLEnvCfg):
                 max_depenetration_velocity=100.0,
                 enable_gyroscopic_forces=True,
             ),
-            
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 enabled_self_collisions=False,
                 solver_position_iteration_count=4,
                 solver_velocity_iteration_count=1,
             ),
-            
             activate_contact_sensors=True,
         ),
-        
         init_state=ArticulationCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 0.5),  # 初始位置：抬高0.5米避免穿地
-            # TODO: 如果需要设置初始关节角度，在这里添加：
-            # joint_pos={
-            #     "left_wheel_joint": 0.0,
-            #     "right_wheel_joint": 0.0,
-            # },
+            pos=(0.0, 0.0, 0.5),
         ),
-        
-        # 执行器配置
         actuators={
-            # TODO: 根据你的机器人修改执行器配置
-            # 方案1：所有关节使用相同参数
             "all_joints": ImplicitActuatorCfg(
-                joint_names_expr=[".*"],  # 匹配所有关节
-                effort_limit=80.0,  # TODO: 根据电机规格修改扭矩限制（Nm）
-                stiffness=0.0,  # 使用扭矩控制
+                joint_names_expr=[".*"],
+                effort_limit=80.0,
+                stiffness=0.0,
                 damping=0.0,
             ),
-            
-            # 方案2：不同关节组使用不同参数（如果需要，取消注释并修改）
-            # "wheels": ImplicitActuatorCfg(
-            #     joint_names_expr=[".*wheel.*"],  # 匹配包含"wheel"的关节
-            #     effort_limit=100.0,
-            #     stiffness=0.0,
-            #     damping=0.0,
-            # ),
         },
     )
 
-    # ========== IMU传感器配置 ==========
-    # TODO: 确认你的机器人base_link名称！
-    # 运行 user/test_code/test_robot_jointsNsensors.py 查看 Body names
-    imu_cfg: ImuCfg = ImuCfg(
-        prim_path="/World/envs/env_.*/Robot/base_link",  # TODO: 修改为你的base body名称
-        update_period=0.01,  # 100Hz更新
-        offset=ImuCfg.OffsetCfg(
-            pos=(0.0, 0.0, 0.0),
-            rot=(1.0, 0.0, 0.0, 0.0),
-        ),
-        debug_vis=False,  # 训练时关闭可视化以提高性能
-    )
+    # target velocity range
+    target_velocity_range: tuple[float, float] = (-1.0, 1.0)
 
-    # ========== 场景配置 ==========
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=1,  # 并行环境数量（先用小数量测试，稳定后再增加）
-        env_spacing=4.0,  # 环境间距（米）
-        replicate_physics=True  # 复制物理场景以提高性能
-    )
-
-    # ========== 自定义参数 ==========
-    
-    # TODO: 修改为你要控制的关节名称
-    # 运行 user/test_code/test_robot_jointsNsensors.py 查看 Joint names
-    # 示例：如果是平衡车，可能有 "left_wheel_joint", "right_wheel_joint"
-    controlled_joint_names = ['Left_front_joint', 'Left_rear_joint', 'Right_front_joint', 
-                              'Right_rear_joint', 'Left_Wheel_joint', 'Right_Wheel_joint']
-    
-    # 动作缩放因子
-    action_scale = 50.0  # TODO: 根据需要调整（将神经网络输出[-1,1]映射到扭矩值）
-    
-    # ========== 目标速度跟随配置 ==========
-    # 目标速度范围（米/秒）
-    target_velocity_range = [-1.0, 1.0]  # 每次reset时从这个范围随机采样目标速度
-    
-    # ========== 奖励函数权重 ==========
-    # TODO: 根据任务目标调整这些权重
-    # 奖励设计建议：
-    # 1. 存活奖励：鼓励机器人保持不倒
+    # ========== 奖励权重配置 ==========
+    # 1. 存活奖励
     rew_scale_alive = 1.0
 
     # 2. 腿摆角和摆角速度惩罚
@@ -180,34 +134,41 @@ class BalanceRobotEnvCfg(DirectRLEnvCfg):
     rew_scale_torque = -0.0001
     
     # ========== 终止条件 ==========
-    # TODO: 根据任务修改终止条件
+    max_tilt_angle: float = 0.5
+    max_position: float = 10.0
     
-    # 机器人倾倒角度限制（弧度）
-    # 如果pitch或roll超过这个角度，认为跌倒
-    max_tilt_angle = 0.5  # 约28度
-    
-    # 位置边界：机器人根位置的范围限制
-    max_position = 10.0  # 超出此范围则终止（米）
-    
-    # ========== 重置/初始化配置 ==========
-    # TODO: 根据需要修改初始状态的随机化范围
-    
-    # 初始姿态角度范围（弧度）
-    initial_tilt_range = [-0.1, 0.1]  # 初始pitch/roll的随机范围
-    
-    # 初始关节位置范围（弧度）
-    initial_joint_pos_range = [-0.1, 0.1]  # 关节初始位置的随机范围
+    # ========== 重置配置 ==========
+    initial_tilt_range: tuple[float, float] = (-0.1, 0.1)
+    initial_joint_pos_range: tuple[float, float] = (-0.1, 0.1)
 
 
-# ========== 简化配置（用于快速测试） ==========
-@configclass 
-class BalanceRobotEnvCfg_PLAY(BalanceRobotEnvCfg):
-    """用于play/evaluation的配置"""
+@configclass
+class CODBipedalFlatEnvCfg(LocomotionBipedalEnvCfg):
+    """COD平衡机器人平地环境配置"""
+    
     def __post_init__(self):
-        # 减少环境数量以便观察
+        """Post initialization - 针对平地环境的参数调整"""
+        super().__post_init__()
+        
+        # 平地环境可以用更多环境并行训练
+        self.scene.num_envs = 24
+        self.scene.env_spacing = 4.0
+        
+        # 平地上可以训练更久一些
+        self.episode_length_s = 15.0
+        
+        # 平地上摩擦力设置
+        self.sim.physics_material.static_friction = 1.0
+        self.sim.physics_material.dynamic_friction = 1.0
+
+
+@configclass
+class CODBipedalFlatEnvCfg_PLAY(CODBipedalFlatEnvCfg):
+    """COD平衡机器人平地环境 - Play模式配置"""
+    
+    def __post_init__(self):
+        super().__post_init__()
+        # Play模式只用一个环境
         self.scene.num_envs = 1
         self.scene.env_spacing = 2.5
-        # 延长episode时间
         self.episode_length_s = 20.0
-        # 启用IMU可视化
-        self.imu_cfg.debug_vis = True
